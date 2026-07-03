@@ -1,0 +1,587 @@
+// ─── Prisma Client Configuration ──────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  MISSED
+}
+
+enum VisitStatus {
+  PENDING      // Task assigned, not started
+  CHECKED_IN   // Employee at customer location
+  COMPLETED    // Visit report submitted
+  CANCELLED
+}
+
+enum AttendanceType {
+  CHECK_IN
+  CHECK_OUT
+}
+
+enum NotificationStatus {
+  UNREAD
+  READ
+  ARCHIVED
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  CHECK_IN_CONFIRMED
+  CHECK_OUT_CONFIRMED
+  REPORT_SUBMITTED
+  PASSWORD_RESET
+  GENERAL
+}
+
+enum ImageType {
+  VISIT_PHOTO
+  REPORT_ATTACHMENT
+  AVATAR
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE AUTH TABLES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// System user — can be Admin, Manager, or Sales Employee (controlled via Role)
+model User {
+  id                String     @id @default(uuid()) @db.Uuid
+  email             String     @unique @db.VarChar(255)
+  passwordHash      String     @db.VarChar(255)
+  firstName         String     @db.VarChar(100)
+  lastName          String     @db.VarChar(100)
+  phone             String?    @db.VarChar(20)
+  avatarUrl         String?    @db.VarChar(500)
+  status            UserStatus @default(PENDING_VERIFICATION)
+  isEmailVerified   Boolean    @default(false)
+
+  // Audit
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  deletedAt         DateTime?  // Soft delete
+  createdBy         String?    @db.Uuid
+  updatedBy         String?    @db.Uuid
+
+  // Relations
+  roles             UserRole[]
+  refreshTokens     RefreshToken[]
+  passwordResets    PasswordReset[]
+  emailVerifications EmailVerification[]
+
+  // Employee-specific
+  managedTeam       Team?           @relation("TeamManager")
+  teamMembership    TeamMember?
+  assignedTasks     Task[]          @relation("EmployeeTasks")
+  visits            Visit[]
+  attendances       Attendance[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  createdCustomers  Customer[]      @relation("CustomerCreatedBy")
+  uploadedImages    Image[]
+
+  @@index([email])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+/// Role definition (Admin, Manager, SalesEmployee)
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique @db.VarChar(50)
+  description String?  @db.VarChar(255)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+/// M:M junction — Users to Roles
+model UserRole {
+  userId    String   @db.Uuid
+  roleId    String   @db.Uuid
+  grantedAt DateTime @default(now())
+  grantedBy String?  @db.Uuid
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([userId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+/// Granular permission (e.g., "employees:create")
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique @db.VarChar(100)
+  description String?  @db.VarChar(255)
+  resource    String   @db.VarChar(50)  // e.g., "employees"
+  action      String   @db.VarChar(50)  // e.g., "create"
+  createdAt   DateTime @default(now())
+
+  // Relations
+  roles       RolePermission[]
+
+  @@index([resource, action])
+  @@map("permissions")
+}
+
+/// M:M junction — Roles to Permissions
+model RolePermission {
+  roleId       String     @db.Uuid
+  permissionId String     @db.Uuid
+  grantedAt    DateTime   @default(now())
+
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([roleId])
+  @@map("role_permissions")
+}
+
+/// Refresh token store — supports token rotation and family-based replay detection
+model RefreshToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  tokenHash   String    @unique @db.VarChar(64) // SHA-256 hash of the token
+  tokenFamily String    @db.Uuid               // Rotation family ID
+  deviceInfo  String?   @db.VarChar(500)       // User-Agent or device metadata
+  ipAddress   String?   @db.VarChar(45)        // IPv6 max = 45 chars
+  isRevoked   Boolean   @default(false)
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@index([tokenFamily])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+/// Password reset tokens (stored as hashes)
+model PasswordReset {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  tokenHash   String    @unique @db.VarChar(64) // SHA-256 of the emailed token
+  expiresAt   DateTime
+  isUsed      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  usedAt      DateTime?
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@map("password_resets")
+}
+
+/// Email verification tokens
+model EmailVerification {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  tokenHash   String    @unique @db.VarChar(64)
+  expiresAt   DateTime
+  isUsed      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("email_verifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEAM MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A team consists of one Manager and multiple Sales Employees
+model Team {
+  id          String       @id @default(uuid()) @db.Uuid
+  name        String       @db.VarChar(150)
+  managerId   String       @unique @db.Uuid
+  description String?      @db.VarChar(500)
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  deletedAt   DateTime?
+
+  manager     User         @relation("TeamManager", fields: [managerId], references: [id])
+  members     TeamMember[]
+
+  @@index([managerId])
+  @@index([deletedAt])
+  @@map("teams")
+}
+
+/// M:M junction — Teams to Users (employees)
+model TeamMember {
+  id         String   @id @default(uuid()) @db.Uuid
+  teamId     String   @db.Uuid
+  userId     String   @unique @db.Uuid // An employee can only be in one team
+  joinedAt   DateTime @default(now())
+
+  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+  @@map("team_members")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMERS & LOCATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Customer master data
+model Customer {
+  id            String             @id @default(uuid()) @db.Uuid
+  name          String             @db.VarChar(200)
+  contactPerson String?            @db.VarChar(150)
+  phone         String?            @db.VarChar(20)
+  email         String?            @db.VarChar(255)
+  address       String?            @db.VarChar(500)
+  notes         String?            @db.Text
+  isActive      Boolean            @default(true)
+
+  // Audit
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  deletedAt     DateTime?
+  createdById   String?            @db.Uuid
+
+  // Relations
+  createdBy     User?              @relation("CustomerCreatedBy", fields: [createdById], references: [id])
+  locations     CustomerLocation[]
+  tasks         Task[]
+
+  @@index([name])
+  @@index([isActive])
+  @@index([deletedAt])
+  @@map("customers")
+}
+
+/// A customer may have multiple GPS-tagged locations (e.g., branches)
+model CustomerLocation {
+  id          String    @id @default(uuid()) @db.Uuid
+  customerId  String    @db.Uuid
+  label       String    @db.VarChar(100)   // e.g., "Main Branch", "Warehouse"
+  address     String?   @db.VarChar(500)
+  latitude    Decimal   @db.Decimal(10, 8)
+  longitude   Decimal   @db.Decimal(11, 8)
+  isPrimary   Boolean   @default(false)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tasks       Task[]
+
+  @@index([customerId])
+  @@index([isPrimary])
+  @@map("customer_locations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASKS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Daily visit task assigned to an employee for a specific customer
+model Task {
+  id                 String           @id @default(uuid()) @db.Uuid
+  employeeId         String           @db.Uuid
+  customerId         String           @db.Uuid
+  locationId         String?          @db.Uuid
+  title              String           @db.VarChar(200)
+  description        String?          @db.Text
+  scheduledDate      DateTime         @db.Date
+  scheduledStartTime DateTime?        @db.Time
+  scheduledEndTime   DateTime?        @db.Time
+  status             TaskStatus       @default(PENDING)
+  priority           Int              @default(1) @db.SmallInt // 1=Low, 2=Medium, 3=High
+  notes              String?          @db.Text
+
+  // Audit
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  deletedAt          DateTime?
+  createdBy          String?          @db.Uuid
+
+  // Relations
+  employee           User             @relation("EmployeeTasks", fields: [employeeId], references: [id])
+  customer           Customer         @relation(fields: [customerId], references: [id])
+  location           CustomerLocation? @relation(fields: [locationId], references: [id])
+  visit              Visit?
+
+  // Composite indexes for the most common query patterns
+  @@index([employeeId, scheduledDate]) // "My tasks for today"
+  @@index([employeeId, status])        // "My pending tasks"
+  @@index([customerId])
+  @@index([scheduledDate])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("tasks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISITS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Visit lifecycle record — ties together a Task, Attendance, and Report
+model Visit {
+  id           String      @id @default(uuid()) @db.Uuid
+  taskId       String      @unique @db.Uuid   // One visit per task
+  employeeId   String      @db.Uuid
+  status       VisitStatus @default(PENDING)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  notes        String?     @db.Text
+
+  // Audit
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  // Relations
+  task         Task        @relation(fields: [taskId], references: [id])
+  employee     User        @relation(fields: [employeeId], references: [id])
+  attendances  Attendance[]
+  report       VisitReport?
+  images       Image[]     @relation("VisitImages")
+
+  @@index([employeeId])
+  @@index([employeeId, status])
+  @@index([taskId])
+  @@index([status])
+  @@map("visits")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATTENDANCE & GPS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Each attendance record represents a single check-in or check-out event
+model Attendance {
+  id                   String         @id @default(uuid()) @db.Uuid
+  visitId              String         @db.Uuid
+  employeeId           String         @db.Uuid
+  type                 AttendanceType
+  latitude             Decimal        @db.Decimal(10, 8)
+  longitude            Decimal        @db.Decimal(11, 8)
+  accuracy             Decimal        @db.Decimal(8, 2)    // meters
+  altitude             Decimal?       @db.Decimal(8, 2)    // meters
+  speed                Decimal?       @db.Decimal(8, 2)    // m/s
+  heading              Decimal?       @db.Decimal(5, 2)    // degrees
+  distanceFromTarget   Int?                                // meters
+  isMockSuspected      Boolean        @default(false)
+  mockScore            Int?           @db.SmallInt         // 0-100
+  mockSignals          String[]       @db.Text             // Array of detected signals
+  deviceInfo           Json?                               // User-Agent + device metadata
+  timestamp            DateTime
+  createdAt            DateTime       @default(now())
+
+  // Relations
+  visit                Visit          @relation(fields: [visitId], references: [id])
+  employee             User           @relation(fields: [employeeId], references: [id])
+
+  @@index([visitId])
+  @@index([employeeId])
+  @@index([employeeId, type])
+  @@index([timestamp])
+  @@index([isMockSuspected])
+  @@map("attendances")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISIT REPORTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Structured visit report submitted by the employee after check-out
+model VisitReport {
+  id               String            @id @default(uuid()) @db.Uuid
+  visitId          String            @unique @db.Uuid
+  summary          String            @db.Text
+  customerFeedback String?           @db.Text
+  nextAction       String?           @db.Text
+  notes            String?           @db.Text
+  submittedAt      DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  // Relations
+  visit            Visit             @relation(fields: [visitId], references: [id])
+  products         VisitProduct[]
+  competitors      VisitCompetitor[]
+  images           Image[]           @relation("ReportImages")
+
+  @@index([visitId])
+  @@map("visit_reports")
+}
+
+/// Products presented during the visit
+model VisitProduct {
+  id          String      @id @default(uuid()) @db.Uuid
+  reportId    String      @db.Uuid
+  name        String      @db.VarChar(200)
+  quantity    Int?
+  unitPrice   Decimal?    @db.Decimal(12, 2)
+  notes       String?     @db.VarChar(500)
+  createdAt   DateTime    @default(now())
+
+  report      VisitReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@map("visit_products")
+}
+
+/// Competitor information captured during the visit
+model VisitCompetitor {
+  id          String      @id @default(uuid()) @db.Uuid
+  reportId    String      @db.Uuid
+  name        String      @db.VarChar(200)
+  product     String?     @db.VarChar(200)
+  price       Decimal?    @db.Decimal(12, 2)
+  notes       String?     @db.VarChar(500)
+  createdAt   DateTime    @default(now())
+
+  report      VisitReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@map("visit_competitors")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IMAGES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Centralized image metadata store — actual files on disk at uploads/
+model Image {
+  id            String      @id @default(uuid()) @db.Uuid
+  uploadedById  String      @db.Uuid
+  type          ImageType
+  originalPath  String      @db.VarChar(500)
+  thumbnailPath String?     @db.VarChar(500)
+  mimeType      String      @db.VarChar(50)
+  sizeBytes     Int
+  width         Int?
+  height        Int?
+  altText       String?     @db.VarChar(255)
+
+  // Polymorphic associations (nullable — image belongs to ONE of these)
+  visitId       String?     @db.Uuid
+  reportId      String?     @db.Uuid
+
+  // Audit
+  createdAt     DateTime    @default(now())
+  deletedAt     DateTime?
+
+  // Relations
+  uploadedBy    User        @relation(fields: [uploadedById], references: [id])
+  visit         Visit?      @relation("VisitImages", fields: [visitId], references: [id])
+  report        VisitReport? @relation("ReportImages", fields: [reportId], references: [id])
+
+  @@index([uploadedById])
+  @@index([visitId])
+  @@index([reportId])
+  @@index([type])
+  @@index([deletedAt])
+  @@map("images")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// In-app notification record
+model Notification {
+  id        String             @id @default(uuid()) @db.Uuid
+  userId    String             @db.Uuid
+  type      NotificationType
+  title     String             @db.VarChar(200)
+  body      String             @db.Text
+  data      Json?              // Additional payload (e.g., visitId, taskId)
+  status    NotificationStatus @default(UNREAD)
+  readAt    DateTime?
+  createdAt DateTime           @default(now())
+
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])  // "My unread notifications"
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Key-value system settings (configurable by Admin)
+model Setting {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique @db.VarChar(100)
+  value       String   @db.Text
+  description String?  @db.VarChar(500)
+  dataType    String   @default("string") @db.VarChar(20) // string|number|boolean|json
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?  @db.Uuid
+
+  @@index([key])
+  @@map("settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT LOGS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Immutable record of all state-changing actions (INSERT, UPDATE, DELETE)
+model AuditLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String?  @db.Uuid
+  action       String   @db.VarChar(100)   // e.g., "USER_LOGIN", "TASK_ASSIGNED"
+  resource     String   @db.VarChar(50)    // e.g., "users", "tasks"
+  resourceId   String?  @db.VarChar(36)    // ID of the affected resource
+  oldValues    Json?                        // Previous state (for updates)
+  newValues    Json?                        // New state
+  ipAddress    String?  @db.VarChar(45)
+  userAgent    String?  @db.VarChar(500)
+  requestId    String?  @db.VarChar(36)
+  createdAt    DateTime @default(now())
+
+  user         User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([resource, resourceId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

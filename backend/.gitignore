@@ -1,3 +1,52 @@
-# dependencies
-/node_modules
-/generated/prisma
+# ─── Dependencies ────────────────────────────────────────────────────────────────
+node_modules/
+
+# ─── Build output ─────────────────────────────────────────────────────────────────
+dist/
+build/
+
+# ─── Environment variables ────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── Uploads (user-generated content — managed outside git) ──────────────────────
+uploads/
+
+# ─── TypeScript incremental build cache ──────────────────────────────────────────
+dist/.tsbuildinfo
+*.tsbuildinfo
+
+# ─── Test coverage ────────────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ─── OS files ─────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ─── IDE / Editor ─────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# ─── Prisma ───────────────────────────────────────────────────────────────────────
+# Keep migrations in git, ignore generated client
+src/database/prisma/generated/
+
+# ─── Temp files ──────────────────────────────────────────────────────────────────
+tmp/
+temp/
+*.tmp
